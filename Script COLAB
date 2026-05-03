@@ -1,0 +1,698 @@
+Abram: https://colab.research.google.com/ 
+Ambiente de execução: Python
+
+# ============================================================
+# PRÁTICA COMPLETA DE ANOVA 1 FATOR – GOOGLE COLAB
+# Exemplo biológico / área da saúde
+# Inclui:
+# - descrição dos dados
+# - gráficos exploratórios
+# - premissas da ANOVA
+# - tabela ANOVA com interpretação
+# - tamanho de efeito
+# - pós-teste de Tukey
+# - gráfico final com médias e letras de Tukey
+# ============================================================
+
+
+# ============================================================
+# CÉLULA 1 – Instalar e importar pacotes
+# O que esta célula faz:
+# 1. Instala bibliotecas extras necessárias no Colab.
+# 2. Importa pacotes para análise estatística e gráficos.
+# ============================================================
+
+!pip -q install pingouin statsmodels scikit-posthocs
+
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+from scipy import stats
+import statsmodels.api as sm
+from statsmodels.formula.api import ols
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
+import pingouin as pg
+import scikit_posthocs as sp
+
+sns.set_theme(style='whitegrid', context='talk')
+np.random.seed(42)
+
+
+# ============================================================
+# CÉLULA 2 – Construção do banco de dados
+# O que esta célula faz:
+# 1. Cria um exemplo de estudo com 4 tratamentos.
+# 2. Cada valor representa a redução da pressão sistólica (mmHg).
+# 3. Esse será o exemplo principal para a ANOVA 1 fator.
+# ============================================================
+
+placebo   = [2, 4, 3, 5, 1, 4, 2, 3, 4, 2, 5, 3]
+farmaco_A = [7, 8, 6, 9, 7, 8, 10, 6, 7, 9, 8, 7]
+farmaco_B = [10, 11, 9, 12, 10, 11, 13, 9, 10, 12, 11, 10]
+farmaco_C = [14, 15, 13, 16, 14, 15, 17, 13, 14, 16, 15, 14]
+
+df = pd.DataFrame({
+    'tratamento': (['Placebo']*12 +
+                   ['Fármaco A']*12 +
+                   ['Fármaco B']*12 +
+                   ['Fármaco C']*12),
+    'reducao_pressao': placebo + farmaco_A + farmaco_B + farmaco_C
+})
+
+print("Visualização inicial do banco de dados:")
+display(df.head())
+print("\nTamanho total da amostra:", len(df))
+
+
+# ============================================================
+# CÉLULA 3 – Estatística descritiva
+# O que esta célula faz:
+# 1. Resume cada grupo em uma tabela.
+# 2. Mostra n, média, desvio padrão, mediana, mínimo, máximo.
+# 3. Calcula erro-padrão e IC95% da média.
+# ============================================================
+
+desc = df.groupby('tratamento')['reducao_pressao'].agg(
+    ['count', 'mean', 'std', 'median', 'min', 'max']
+).reset_index()
+
+desc['se'] = desc['std'] / np.sqrt(desc['count'])
+desc['ic95_inf'] = desc['mean'] - 1.96 * desc['se']
+desc['ic95_sup'] = desc['mean'] + 1.96 * desc['se']
+
+print("Tabela descritiva por tratamento:")
+display(desc.round(3))
+
+print("""
+INTERPRETAÇÃO DA TABELA DESCRITIVA:
+- count  = número de observações no grupo
+- mean   = média do grupo
+- std    = desvio padrão (dispersão)
+- median = mediana
+- min    = menor valor
+- max    = maior valor
+- se     = erro padrão da média
+- ic95_inf / ic95_sup = intervalo de confiança de 95% da média
+""")
+
+
+# ============================================================
+# CÉLULA 4 – Gráfico exploratório
+# O que esta célula faz:
+# 1. Mostra boxplot por grupo.
+# 2. Sobrepõe os pontos individuais.
+# 3. Ajuda a inspecionar dispersão, tendência central e outliers.
+# ============================================================
+
+plt.figure(figsize=(11, 6))
+sns.boxplot(data=df, x='tratamento', y='reducao_pressao', palette='Set2')
+sns.stripplot(data=df, x='tratamento', y='reducao_pressao',
+              color='black', alpha=0.6, jitter=True)
+plt.title('Redução da pressão arterial por tratamento')
+plt.xlabel('Tratamento')
+plt.ylabel('Redução da pressão sistólica (mmHg)')
+plt.tight_layout()
+plt.show()
+
+
+# ============================================================
+# CÉLULA 5 – Definição das hipóteses
+# O que esta célula faz:
+# 1. Explica a hipótese nula e alternativa da ANOVA.
+# ============================================================
+
+print("""
+HIPÓTESES DA ANOVA DE 1 FATOR
+
+Hipótese nula (H0):
+As médias populacionais de todos os grupos são iguais.
+H0: μPlacebo = μFármacoA = μFármacoB = μFármacoC
+
+Hipótese alternativa (H1):
+Pelo menos uma média difere das demais.
+
+O teste ANOVA responde:
+"Existe evidência de diferença entre as médias dos grupos?"
+
+Se p < 0,05:
+- rejeitamos H0
+- concluímos que pelo menos um grupo difere
+
+Se p >= 0,05:
+- não rejeitamos H0
+- não há evidência suficiente de diferença entre as médias
+""")
+
+
+# ============================================================
+# CÉLULA 6 – Ajuste do modelo
+# O que esta célula faz:
+# 1. Ajusta um modelo linear com tratamento como fator categórico.
+# 2. Obtém os resíduos do modelo para checar premissas.
+# ============================================================
+
+modelo = ols('reducao_pressao ~ C(tratamento)', data=df).fit()
+residuos = modelo.resid
+
+print("Resumo curto do modelo ajustado:")
+print(modelo.summary())
+
+
+# ============================================================
+# CÉLULA 7 – Verificação das premissas
+# O que esta célula faz:
+# 1. Testa normalidade dos resíduos (Shapiro-Wilk).
+# 2. Testa homogeneidade das variâncias (Levene).
+# 3. Mostra histograma e QQ-plot dos resíduos.
+#
+# Premissas clássicas da ANOVA:
+# - independência das observações
+# - normalidade dos resíduos
+# - homogeneidade de variâncias
+# ============================================================
+
+print("TESTE DE SHAPIRO-WILK PARA OS RESÍDUOS")
+shapiro_result = stats.shapiro(residuos)
+print(shapiro_result)
+
+print("\nTESTE DE LEVENE PARA HOMOGENEIDADE DE VARIÂNCIAS")
+levene_result = stats.levene(
+    df.loc[df['tratamento'] == 'Placebo', 'reducao_pressao'],
+    df.loc[df['tratamento'] == 'Fármaco A', 'reducao_pressao'],
+    df.loc[df['tratamento'] == 'Fármaco B', 'reducao_pressao'],
+    df.loc[df['tratamento'] == 'Fármaco C', 'reducao_pressao']
+)
+print(levene_result)
+
+print("""
+INTERPRETAÇÃO DOS TESTES DE PREMISSAS:
+- Shapiro-Wilk:
+  H0 = resíduos seguem distribuição normal
+  Se p > 0,05, não rejeitamos a normalidade
+
+- Levene:
+  H0 = variâncias dos grupos são iguais
+  Se p > 0,05, não rejeitamos homogeneidade de variâncias
+""")
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+sns.histplot(residuos, kde=True, ax=axes[0], color='steelblue')
+axes[0].set_title('Histograma dos resíduos')
+
+sm.qqplot(residuos, line='45', ax=axes[1])
+axes[1].set_title('QQ-plot dos resíduos')
+
+plt.tight_layout()
+plt.show()
+
+
+# ============================================================
+# CÉLULA 8 – Tabela ANOVA
+# O que esta célula faz:
+# 1. Gera a tabela ANOVA.
+# 2. Explica o significado das colunas:
+#    sum_sq, df, F, PR(>F)
+# ============================================================
+
+anova = sm.stats.anova_lm(modelo, typ=2)
+print("TABELA ANOVA")
+display(anova)
+
+print("""
+COMO INTERPRETAR A TABELA ANOVA
+
+1) sum_sq  = soma de quadrados
+   - Mede a variabilidade associada a cada fonte.
+   - Em C(tratamento): variabilidade explicada pelo fator tratamento.
+   - Em Residual: variabilidade não explicada (erro dentro dos grupos).
+
+2) df = graus de liberdade
+   - Para o fator: k - 1
+   - Para o resíduo: N - k
+   onde k = número de grupos; N = número total de observações
+
+3) F = estatística F
+   - É a razão entre a variabilidade entre grupos e a variabilidade dentro dos grupos.
+   - Quanto maior o F, maior a evidência de que as médias não são todas iguais.
+
+4) PR(>F) = p-valor
+   - Probabilidade de observar um F tão extremo quanto o observado,
+     assumindo que H0 é verdadeira.
+   - Se p < 0,05: rejeitamos H0
+   - Se p >= 0,05: não rejeitamos H0
+""")
+
+p_anova = anova.loc['C(tratamento)', 'PR(>F)']
+F_anova = anova.loc['C(tratamento)', 'F']
+
+print(f"Valor de F observado: {F_anova:.4f}")
+print(f"Valor de p observado: {p_anova:.6f}")
+
+if p_anova < 0.05:
+    print("""
+CONCLUSÃO DA ANOVA:
+Como p < 0,05, rejeitamos a hipótese nula.
+Existe evidência estatística de que pelo menos uma média difere entre os tratamentos.
+""")
+else:
+    print("""
+CONCLUSÃO DA ANOVA:
+Como p >= 0,05, não rejeitamos a hipótese nula.
+Não há evidência suficiente para afirmar diferença entre as médias dos tratamentos.
+""")
+
+
+# ============================================================
+# CÉLULA 9 – Tamanho de efeito
+# O que esta célula faz:
+# 1. Calcula ANOVA com Pingouin.
+# 2. Mostra o tamanho de efeito (ex.: eta-quadrado).
+# 3. Ajuda a interpretar a magnitude prática da diferença.
+# ============================================================
+
+aov_pg = pg.anova(data=df, dv='reducao_pressao', between='tratamento', detailed=True)
+print("ANOVA com tamanho de efeito:")
+display(aov_pg)
+
+print("""
+INTERPRETAÇÃO DO TAMANHO DE EFEITO:
+- Além do p-valor, é importante saber o quanto o fator explica da variação.
+- Em geral, eta² maior indica efeito mais forte do tratamento.
+- O p-valor diz se há evidência de diferença.
+- O tamanho de efeito diz quão grande é essa diferença em termos práticos.
+""")
+
+
+# ============================================================
+# CÉLULA 10 – Pós-teste de Tukey
+# O que esta célula faz:
+# 1. Compara todos os pares de grupos.
+# 2. Mostra quais pares diferem estatisticamente.
+# 3. Deve ser usado após ANOVA significativa.
+# ============================================================
+
+tukey = pairwise_tukeyhsd(
+    endog=df['reducao_pressao'],
+    groups=df['tratamento'],
+    alpha=0.05
+)
+
+print("PÓS-TESTE DE TUKEY")
+print(tukey.summary())
+
+print("""
+COMO INTERPRETAR A TABELA DE TUKEY
+
+- group1 e group2: grupos comparados
+- meandiff: diferença entre as médias
+- p-adj: p-valor ajustado para múltiplas comparações
+- lower e upper: intervalo de confiança da diferença
+- reject:
+    True  = diferença significativa entre os grupos
+    False = diferença não significativa
+
+Se dois grupos possuem diferença significativa, eles não devem compartilhar a mesma letra no gráfico final.
+""")
+
+
+# ============================================================
+# CÉLULA 11 – Gráfico de médias com IC95%
+# O que esta célula faz:
+# 1. Mostra um gráfico limpo para apresentação.
+# 2. Resume média e intervalo de confiança.
+# ============================================================
+
+plt.figure(figsize=(10, 6))
+sns.pointplot(data=df, x='tratamento', y='reducao_pressao',
+              errorbar=('ci', 95), capsize=.15, color='darkred')
+plt.title('Médias e IC95% da redução da pressão arterial')
+plt.xlabel('Tratamento')
+plt.ylabel('Redução média da pressão (mmHg)')
+plt.tight_layout()
+plt.show()
+
+
+# ============================================================
+# CÉLULA 12 – Preparar tabela de Tukey em DataFrame
+# O que esta célula faz:
+# 1. Converte a saída do Tukey em DataFrame.
+# 2. Facilita a manipulação para gerar letras de grupos.
+# ============================================================
+
+tukey_df = pd.DataFrame(
+    data=tukey._results_table.data[1:],
+    columns=tukey._results_table.data[0]
+)
+
+# Ajustes de tipo
+tukey_df['p-adj'] = tukey_df['p-adj'].astype(float)
+tukey_df['meandiff'] = tukey_df['meandiff'].astype(float)
+tukey_df['lower'] = tukey_df['lower'].astype(float)
+tukey_df['upper'] = tukey_df['upper'].astype(float)
+tukey_df['reject'] = tukey_df['reject'].astype(bool)
+
+print("Tabela do Tukey em DataFrame:")
+display(tukey_df)
+
+
+# ============================================================
+# CÉLULA 13 – Função para gerar letras de Tukey
+# O que esta célula faz:
+# 1. Cria uma versão prática de agrupamento por letras.
+# 2. Grupos que NÃO diferem podem compartilhar letras.
+# 3. Grupos que diferem significativamente NÃO compartilham letras.
+#
+# Observação:
+# Essa é uma implementação prática de compact letter display.
+# ============================================================
+
+def gerar_letras_tukey(tukey_df, medias_df, grupo_col='tratamento', media_col='mean'):
+    grupos = medias_df.sort_values(media_col)[grupo_col].tolist()
+
+    # matriz de significância: True = grupos diferem
+    sig = pd.DataFrame(False, index=grupos, columns=grupos)
+
+    for _, row in tukey_df.iterrows():
+        g1 = row['group1']
+        g2 = row['group2']
+        rj = bool(row['reject'])
+        sig.loc[g1, g2] = rj
+        sig.loc[g2, g1] = rj
+
+    letras_disponiveis = list("abcdefghijklmnopqrstuvwxyz")
+    letras_grupos = {g: "" for g in grupos}
+    conjuntos = []
+
+    for g in grupos:
+        colocado = False
+
+        for i, conjunto in enumerate(conjuntos):
+            # grupo pode entrar no conjunto se NÃO for diferente de ninguém ali
+            pode_entrar = True
+            for membro in conjunto:
+                if sig.loc[g, membro] == True:
+                    pode_entrar = False
+                    break
+            if pode_entrar:
+                conjunto.append(g)
+                letras_grupos[g] += letras_disponiveis[i]
+                colocado = True
+
+        if not colocado:
+            conjuntos.append([g])
+            letras_grupos[g] += letras_disponiveis[len(conjuntos)-1]
+
+    # ajuste extra: se um grupo puder compartilhar letra com outro conjunto sem conflito, adiciona
+    for g in grupos:
+        for i, conjunto in enumerate(conjuntos):
+            letra = letras_disponiveis[i]
+            if letra in letras_grupos[g]:
+                continue
+            pode_entrar = True
+            for membro in conjunto:
+                if sig.loc[g, membro] == True:
+                    pode_entrar = False
+                    break
+            if pode_entrar:
+                letras_grupos[g] += letra
+
+    return letras_grupos
+
+
+# ============================================================
+# CÉLULA 14 – Gerar letras de Tukey
+# O que esta célula faz:
+# 1. Ordena grupos pela média.
+# 2. Atribui letras para o gráfico final.
+# ============================================================
+
+medias_plot = desc[['tratamento', 'mean', 'se', 'ic95_inf', 'ic95_sup']].copy()
+medias_plot = medias_plot.sort_values('mean')
+
+letras = gerar_letras_tukey(tukey_df, medias_plot, grupo_col='tratamento', media_col='mean')
+medias_plot['letra_tukey'] = medias_plot['tratamento'].map(letras)
+
+print("Tabela final com letras de Tukey:")
+display(medias_plot.round(3))
+
+print("""
+INTERPRETAÇÃO DAS LETRAS DE TUKEY:
+- Grupos com a mesma letra: não diferem estatisticamente entre si.
+- Grupos com letras diferentes: diferem estatisticamente.
+- Esse formato é muito usado em gráficos de artigos, relatórios e dissertações.
+""")
+
+
+# ============================================================
+# CÉLULA 15 – Gráfico final para relatório
+# O que esta célula faz:
+# 1. Gera gráfico de barras com média e IC95%.
+# 2. Adiciona letras de Tukey acima das barras.
+# 3. Produz figura final pronta para relatório/artigo.
+# ============================================================
+
+plt.figure(figsize=(11, 7))
+
+x = np.arange(len(medias_plot))
+y = medias_plot['mean'].values
+yerr_inf = medias_plot['mean'].values - medias_plot['ic95_inf'].values
+yerr_sup = medias_plot['ic95_sup'].values - medias_plot['mean'].values
+
+bars = plt.bar(
+    x, y,
+    yerr=[yerr_inf, yerr_sup],
+    capsize=8,
+    color=sns.color_palette("Set2", len(medias_plot)),
+    edgecolor='black',
+    linewidth=1.2
+)
+
+for i, row in medias_plot.reset_index(drop=True).iterrows():
+    plt.text(
+        i,
+        row['ic95_sup'] + 0.6,
+        row['letra_tukey'],
+        ha='center',
+        va='bottom',
+        fontsize=16,
+        fontweight='bold'
+    )
+
+plt.xticks(x, medias_plot['tratamento'])
+plt.ylabel('Redução média da pressão sistólica (mmHg)')
+plt.xlabel('Tratamento')
+plt.title('Redução da pressão arterial por tratamento\nMédia ± IC95% e grupos de Tukey')
+plt.ylim(0, medias_plot['ic95_sup'].max() + 3)
+plt.tight_layout()
+plt.show()
+
+
+# ============================================================
+# CÉLULA 16 – Texto interpretativo final
+# O que esta célula faz:
+# 1. Resume o fluxo da análise.
+# 2. Dá um modelo de interpretação estatística.
+# ============================================================
+
+print("========== INTERPRETAÇÃO FINAL ==========")
+print("""
+1. Primeiro observamos a estatística descritiva e os gráficos exploratórios.
+2. Em seguida verificamos as premissas da ANOVA:
+   - normalidade dos resíduos
+   - homogeneidade de variâncias
+3. Depois rodamos a ANOVA para testar a hipótese global.
+4. Como a ANOVA avalia apenas se existe alguma diferença entre médias,
+   usamos o teste de Tukey para descobrir ENTRE QUAIS grupos essa diferença ocorre.
+5. Por fim, o gráfico com letras resume visualmente o resultado.
+
+MODELO DE FRASE PARA RELATÓRIO:
+"Foi realizada ANOVA de um fator para comparar a redução da pressão arterial entre os tratamentos.
+Observou-se efeito significativo do tratamento sobre a redução da pressão [inserir F e p].
+O pós-teste de Tukey indicou diferença entre os grupos [descrever os pares ou letras].
+Os resultados são apresentados como média ± IC95%."
+
+OBSERVAÇÃO:
+- A ANOVA testa diferença global.
+- O Tukey identifica as comparações par a par.
+- Letras iguais indicam ausência de diferença estatística.
+- Letras diferentes indicam diferença estatística.
+""")
+
+
+# ============================================================
+# CÉLULA 17 – Função reutilizável para seus próprios dados
+# O que esta célula faz:
+# 1. Reúne o fluxo principal em uma função.
+# 2. Permite usar o mesmo procedimento em outro experimento.
+# ============================================================
+
+def anova_1fator_completo(df, resposta, grupo, alpha=0.05):
+    import numpy as np
+    import pandas as pd
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+    from scipy import stats
+    import statsmodels.api as sm
+    from statsmodels.formula.api import ols
+    from statsmodels.stats.multicomp import pairwise_tukeyhsd
+    import pingouin as pg
+
+    print("\n============================")
+    print("ANÁLISE COMPLETA – ANOVA 1 FATOR")
+    print("============================\n")
+
+    # Descritiva
+    desc = df.groupby(grupo)[resposta].agg(['count', 'mean', 'std', 'median', 'min', 'max']).reset_index()
+    desc['se'] = desc['std'] / np.sqrt(desc['count'])
+    desc['ic95_inf'] = desc['mean'] - 1.96 * desc['se']
+    desc['ic95_sup'] = desc['mean'] + 1.96 * desc['se']
+
+    print("Tabela descritiva:")
+    display(desc.round(3))
+
+    # Gráfico exploratório
+    plt.figure(figsize=(10, 6))
+    sns.boxplot(data=df, x=grupo, y=resposta, palette='Set3')
+    sns.stripplot(data=df, x=grupo, y=resposta, color='black', alpha=0.5, jitter=True)
+    plt.title('Distribuição dos dados por grupo')
+    plt.tight_layout()
+    plt.show()
+
+    # Modelo
+    formula = f'{resposta} ~ C({grupo})'
+    modelo = ols(formula, data=df).fit()
+    residuos = modelo.resid
+
+    # Premissas
+    print("Shapiro-Wilk:", stats.shapiro(residuos))
+    grupos_lista = [g[resposta].values for _, g in df.groupby(grupo)]
+    print("Levene:", stats.levene(*grupos_lista))
+
+    # ANOVA
+    anova = sm.stats.anova_lm(modelo, typ=2)
+    print("\nTabela ANOVA:")
+    display(anova)
+
+    # Efeito
+    print("\nTamanho de efeito:")
+    display(pg.anova(data=df, dv=resposta, between=grupo, detailed=True))
+
+    # Tukey
+    tukey = pairwise_tukeyhsd(endog=df[resposta], groups=df[grupo], alpha=alpha)
+    print("\nTukey:")
+    print(tukey.summary())
+
+    tukey_df = pd.DataFrame(tukey._results_table.data[1:], columns=tukey._results_table.data[0])
+    tukey_df['p-adj'] = tukey_df['p-adj'].astype(float)
+    tukey_df['meandiff'] = tukey_df['meandiff'].astype(float)
+    tukey_df['lower'] = tukey_df['lower'].astype(float)
+    tukey_df['upper'] = tukey_df['upper'].astype(float)
+    tukey_df['reject'] = tukey_df['reject'].astype(bool)
+
+    medias_plot = desc[[grupo, 'mean', 'se', 'ic95_inf', 'ic95_sup']].copy()
+    medias_plot = medias_plot.sort_values('mean')
+
+    def gerar_letras_tukey_local(tukey_df, medias_df, grupo_col, media_col='mean'):
+        grupos = medias_df.sort_values(media_col)[grupo_col].tolist()
+        sig = pd.DataFrame(False, index=grupos, columns=grupos)
+
+        for _, row in tukey_df.iterrows():
+            g1 = row['group1']
+            g2 = row['group2']
+            rj = bool(row['reject'])
+            sig.loc[g1, g2] = rj
+            sig.loc[g2, g1] = rj
+
+        letras_disponiveis = list("abcdefghijklmnopqrstuvwxyz")
+        letras_grupos = {g: "" for g in grupos}
+        conjuntos = []
+
+        for g in grupos:
+            colocado = False
+            for i, conjunto in enumerate(conjuntos):
+                pode_entrar = True
+                for membro in conjunto:
+                    if sig.loc[g, membro] == True:
+                        pode_entrar = False
+                        break
+                if pode_entrar:
+                    conjunto.append(g)
+                    letras_grupos[g] += letras_disponiveis[i]
+                    colocado = True
+            if not colocado:
+                conjuntos.append([g])
+                letras_grupos[g] += letras_disponiveis[len(conjuntos)-1]
+
+        for g in grupos:
+            for i, conjunto in enumerate(conjuntos):
+                letra = letras_disponiveis[i]
+                if letra in letras_grupos[g]:
+                    continue
+                pode_entrar = True
+                for membro in conjunto:
+                    if sig.loc[g, membro] == True:
+                        pode_entrar = False
+                        break
+                if pode_entrar:
+                    letras_grupos[g] += letra
+
+        return letras_grupos
+
+    letras = gerar_letras_tukey_local(tukey_df, medias_plot, grupo_col=grupo, media_col='mean')
+    medias_plot['letra_tukey'] = medias_plot[grupo].map(letras)
+
+    print("\nTabela final com letras:")
+    display(medias_plot.round(3))
+
+    # Gráfico final
+    plt.figure(figsize=(11, 7))
+    x = np.arange(len(medias_plot))
+    y = medias_plot['mean'].values
+    yerr_inf = medias_plot['mean'].values - medias_plot['ic95_inf'].values
+    yerr_sup = medias_plot['ic95_sup'].values - medias_plot['mean'].values
+
+    plt.bar(
+        x, y,
+        yerr=[yerr_inf, yerr_sup],
+        capsize=8,
+        color=sns.color_palette("Set2", len(medias_plot)),
+        edgecolor='black'
+    )
+
+    for i, row in medias_plot.reset_index(drop=True).iterrows():
+        plt.text(
+            i,
+            row['ic95_sup'] + 0.05 * max(y),
+            row['letra_tukey'],
+            ha='center',
+            va='bottom',
+            fontsize=16,
+            fontweight='bold'
+        )
+
+    plt.xticks(x, medias_plot[grupo])
+    plt.xlabel(grupo)
+    plt.ylabel(resposta)
+    plt.title(f'{resposta} por {grupo}\nMédia ± IC95% e letras de Tukey')
+    plt.tight_layout()
+    plt.show()
+
+    return {
+        'descritiva': desc,
+        'anova': anova,
+        'tukey_tabela': tukey_df,
+        'medias_letras': medias_plot,
+        'modelo': modelo
+    }
+
+
+# ============================================================
+# CÉLULA 18 – Exemplo de uso da função
+# O que esta célula faz:
+# 1. Executa todo o fluxo automaticamente no banco criado acima.
+# ============================================================
+
+resultado = anova_1fator_completo(df, 'reducao_pressao', 'tratamento')
